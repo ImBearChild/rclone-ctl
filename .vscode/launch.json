@@ -8,11 +8,23 @@
             "name": "Python: RCD",
             "type": "python",
             "request": "launch",
-            "program": "./rclone-ctl.py",
+            "program": "./rclonectl.py",
             "console": "integratedTerminal",
             "args": [
                 "rcd",
                 "start"
+            ]
+        },
+        {
+            "name": "Python: Service",
+            "type": "python",
+            "request": "launch",
+            "program": "./rclonectl.py",
+            "console": "integratedTerminal",
+            "args": [
+                "service",
+                "start",
+                "my-webdav"
             ]
         }
     ]
