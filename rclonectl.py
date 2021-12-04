@@ -10,16 +10,15 @@ import subprocess
 import time
 import urllib.request
 import json
+import sys
 
 logging.basicConfig(level=logging.DEBUG)
-
 SUPPORTRED_SERVE = ["webdav"]
-
 
 class RclonectlConfig(object):
     warnings = []
 
-    _parser = None
+    parser = None
     # parsed = {}
 
     _default_ini = """
@@ -31,7 +30,7 @@ rc_pass = forty-two
 cache_dir = /tmp/rclone-ctl
 
 [rclone-ctl]
-pid_file=${rclone:cache_dir}/rclone-ctl.pid
+pid_file=${rclone:cache_dir}/rclonectl.pid
 """
 
     def __init__(self, path=None):
@@ -39,7 +38,7 @@ pid_file=${rclone:cache_dir}/rclone-ctl.pid
         self.path = path
         self.warnings = []
         self._parsed = []
-        self._parser = configparser.ConfigParser(
+        self.parser = configparser.ConfigParser(
             interpolation=configparser.ExtendedInterpolation())
         self.read_string(self._default_ini)
         if path:
@@ -47,18 +46,23 @@ pid_file=${rclone:cache_dir}/rclone-ctl.pid
         # self._maintain_renaimed_options()
 
     def __getattr__(self, name):
-        return getattr(self._parser, name)
+        return getattr(self.parser, name)
 
     def get_default_path(self):
-        p = os.path.join(os.getcwd(), "rclone-ctl.ini")
+        p = os.path.join(os.getcwd(), "rclonectl.ini")
         if os.path.isfile(p):
             return p
 
+    def get_section(self,section):
+        return self.parser[section]
     def get_services(self):
-        return [s for s in self._parser.sections() if s.startswith("service@")]
+        return [s for s in self.parser.sections() if s.endswith(".service")]
+    def get_mounts(self):
+        return [s for s in self.parser.sections() if s.endswith(".mount")]
+    def get_units(self):
+        return [s for s in self.parser.sections() if s.startswith("unit:")]
 
-
-class RemoteControlServer(object):
+class RcloneRCServer(object):
     addr = None
     opener = None
 
@@ -72,6 +76,7 @@ class RemoteControlServer(object):
 
     def send_request(self, command, parameter):
         json_para = json.dumps(parameter)
+        logging.debug(json_para)
         data = bytes(json_para, encoding="utf-8")
         req = urllib.request.Request(
             self.path+command, data, headers={'Content-Type': 'application/json'})
@@ -91,6 +96,48 @@ class RemoteControlServer(object):
         return False
 
 
+class RclonectlUnit(object):
+    name = ""
+    _conf = None
+    _rc_server = None
+    _start_handler = None
+    _stop_handler = None
+
+    def __init__(self,name, conf, rc_server):
+        self.unit_name = name
+        self._conf = conf
+        self._rc_server = rc_server
+        logging.debug(name)
+        if self.unit_name.endswith("service"):
+            self._start_handler = self._start_service
+            self._stop_handler = self._stop_service
+
+    def _start_service(self):
+        if self._conf['protocol'] in SUPPORTRED_SERVE:
+            serve_arg = [self._conf['protocol'],
+                         "--user="+self._conf['user'],
+                         "--pass="+self._conf['pass'],
+                         "--addr="+self._conf['addr'],
+                         self._conf['remote_path']]
+            result = self._rc_server.send_request(
+                "core/command", {"command": "serve", "arg": serve_arg,"_async": True})
+            if result.get('error'):
+                logging.warning("Rclone reported an error")
+            if result.get('jobid'):
+                logging.info("Success!")
+
+    def _stop_service(self):
+        logging.error("Unsupported feature! Still under developemnt...")
+
+    def start(self):
+        logging.info("Starting unit %s", self.unit_name)
+        self._start_handler()
+        pass
+    def stop(self):
+        logging.info("Stopping unit %s", self.unit_name)
+        self._stop_handler()
+        pass
+
 def util_ranstr(num):
     salt = ''.join(random.sample(string.ascii_letters + string.digits, num))
     return salt
@@ -98,11 +145,10 @@ def util_ranstr(num):
 
 def err_exit():
     logging.error("Rclone-ctl will exit due to unrecoverable error")
-    exit()
+    sys.exit()
 
 
-def run_rcd():
-
+def exec_rcd():
     if args.command == "stop":
         f = open(config.get("rclone-ctl", "pid_file"), "r")
         pid = int((f.read()))
@@ -112,7 +158,7 @@ def run_rcd():
         except ProcessLookupError:
             logging.error("No process found, already killed?")
         f.close()
-        exit()
+        sys.exit()
 
     exec_file = config.get("rclone", "exec_file")
     cache_dir = config.get("rclone", "cache_dir")
@@ -141,35 +187,27 @@ def run_rcd():
         f.close()
 
 
-def run_without_command():
+def exec_without_command():
     parser.print_help()
 
 
-def run_service():
-    service_name = "service@"+args.service
-    if not service_name in config.get_services():
-        logging.error("Service not found: %s", args.service)
+def exec_unit():
+    unit_name = args.unit
+    if not "unit:"+unit_name in config.get_units():
+        logging.error("Service not found: %s", args.unit)
         err_exit()
-    rcs = RemoteControlServer(config.get("rclone", "rc_user"), config.get(
+    rcs = RcloneRCServer(config.get("rclone", "rc_user"), config.get(
         "rclone", "rc_pass"), config.get("rclone", "rc_addr"))
     if not rcs.check():
         logging.error("Not a rclone remote server on %s",
                       config.get("rclone", "rc_addr"))
         err_exit()
     if args.command == "start":
-        logging.info("Starting service %s", args.service)
-        if config.get(service_name, "type") in SUPPORTRED_SERVE:
-            serve_arg = [config.get(service_name, "type"),
-                         "--user="+config.get(service_name, "user"),
-                         "--pass="+config.get(service_name, "pass"),
-                         "--addr="+config.get(service_name, "addr"),
-                         config.get(service_name, "remote_path")]
-            result = rcs.send_request(
-                "core/command", {"command": "serve", "arg": serve_arg, "returnType": "STREAM"})
-            logging.debug(result)
-            if result['error']:
-                logging.warning("Rclone repond an error")
-
+        unit = RclonectlUnit(unit_name, config.get_section("unit:"+unit_name), rcs)
+        unit.start()
+    elif args.command == "stop":
+        unit = RclonectlUnit(unit_name, config.get_section("unit:"+unit_name), rcs)
+        unit.stop()
 
 if __name__ == "__main__":
     import argparse
@@ -181,19 +219,19 @@ if __name__ == "__main__":
 
     parser_rcd = subparsers.add_parser(
         'rcd', help='run a rlcone remote control daemon')
-    parser_rcd.set_defaults(func=run_rcd)
+    parser_rcd.set_defaults(func=exec_rcd)
     parser_rcd.add_argument(
         'command', choices=['start', 'stop'], action='store')
 
-    parser_service = subparsers.add_parser(
-        'service', help='manage services provided by rclone')
-    parser_service.set_defaults(func=run_service)
-    parser_service.add_argument(
+    parser_unit = subparsers.add_parser(
+        'unit', help='manage services provided by rclone')
+    parser_unit.set_defaults(func=exec_unit)
+    parser_unit.add_argument(
         'command', choices=['start', 'stop'], action='store')
-    parser_service.add_argument(
-        'service', action='store')
+    parser_unit.add_argument(
+        'unit', action='store')
 
-    parser.set_defaults(func=run_without_command)
+    parser.set_defaults(func=exec_without_command)
     args = parser.parse_args()
 
     config = RclonectlConfig()

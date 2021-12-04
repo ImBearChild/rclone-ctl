@@ -129,5 +129,7 @@ dmypy.json
 .pyre/
 
 #
-rclone-ctl.ini
+rclonectl.ini
+rclone-bin
 *.pid
+.vscode/
